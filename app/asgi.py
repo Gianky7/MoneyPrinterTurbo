@@ -1,5 +1,6 @@
 """Application implementation - ASGI."""
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 
@@ -15,20 +16,40 @@ from app.models.exception import HttpException
 from app.router import root_api_router
 from app.utils import utils
 
+RECOVERY_TIMEOUT_SECONDS = 30
+
+
+async def _run_startup_recovery() -> None:
+    """Run best-effort startup recovery without blocking API readiness."""
+    logger.info("MPT_RECOVERY_STARTED")
+    try:
+        from app.services import task as task_service
+
+        await asyncio.wait_for(
+            asyncio.to_thread(task_service.recover_interrupted_cross_posts),
+            timeout=RECOVERY_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.exception("MPT_RECOVERY_FAILED")
+    else:
+        logger.info("MPT_RECOVERY_COMPLETE")
+
 
 @asynccontextmanager
 async def application_lifespan(_: FastAPI):
     """集中处理 API 进程启动恢复和关闭日志。"""
-    logger.info("startup event")
+    logger.info("MPT_STARTUP_BEGIN")
 
-    # 跨平台发布由当前进程线程池执行，不会在服务重启后恢复。启动时把 Redis
-    # 中确认已失去执行进程的活动状态收敛为失败，避免任务永久无法删除。
-    from app.services import task as task_service
-
-    task_service.recover_interrupted_cross_posts()
+    # 跨平台发布由当前进程线程池执行，不会在服务重启后恢复。恢复任务只做
+    # best-effort 后台处理，不能阻塞 FastAPI lifespan yield，否则 Railway
+    # 会在应用尚未 ready 时返回 502。
+    recovery_task = asyncio.create_task(_run_startup_recovery())
     try:
+        logger.info("MPT_API_READY")
         yield
     finally:
+        if not recovery_task.done():
+            recovery_task.cancel()
         logger.info("shutdown event")
 
 
@@ -63,6 +84,12 @@ def get_application() -> FastAPI:
         lifespan=application_lifespan,
     )
     instance.include_router(root_api_router)
+
+    @instance.get("/healthz", tags=["Health Check"])
+    def healthz() -> dict[str, str]:
+        """Lightweight readiness endpoint with no external dependencies."""
+        return {"status": "ok"}
+
     instance.add_exception_handler(HttpException, exception_handler)
     instance.add_exception_handler(RequestValidationError, validation_exception_handler)
     return instance
