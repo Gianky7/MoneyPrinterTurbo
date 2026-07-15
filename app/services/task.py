@@ -3,6 +3,7 @@ import os
 import re
 import socket
 import threading
+import traceback
 import time
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from functools import partial
@@ -1128,14 +1129,30 @@ def _run_pipeline(task_id, params: VideoParams, stop_at: str = "video"):
     return kwargs
 
 
+def _log_pipeline_exception(task_id: str, stage: str, exc: Exception) -> None:
+    """Log full diagnostics for unexpected pipeline exceptions."""
+    tb_summary = traceback.extract_tb(exc.__traceback__)
+    origin = tb_summary[-1] if tb_summary else None
+    origin_text = (
+        f"{origin.filename}:{origin.lineno}" if origin is not None else "unknown:0"
+    )
+    logger.exception(
+        "MPT_RENDER_FAILED: pipeline stage failed; "
+        f"task_id={task_id}; "
+        f"stage={stage}; "
+        f"exception_type={type(exc).__name__}; "
+        f"exception_message={exc}; "
+        f"error_file_line={origin_text}; "
+        f"traceback=\n{traceback.format_exc()}"
+    )
+
+
 def start(task_id, params: VideoParams, stop_at: str = "video"):
     """执行任务流水线，并确保未预期异常也会转换成可查询的失败状态。"""
     try:
         return _run_pipeline(task_id, params, stop_at=stop_at)
     except Exception as exc:
-        logger.exception(
-            f"unexpected task pipeline failure, task_id: {task_id}, error: {exc}"
-        )
+        _log_pipeline_exception(task_id, "pipeline", exc)
         return _mark_task_failed(
             task_id,
             "pipeline",
