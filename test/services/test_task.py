@@ -729,6 +729,34 @@ class TestTaskService(unittest.TestCase):
             "RuntimeError: provider connection reset",
         )
 
+    def test_start_logs_full_traceback_for_pipeline_exception(self):
+        """Pipeline exceptions must log full diagnostics for Railway deploy logs."""
+        params = VideoParams(video_subject="Coffee")
+        state = MemoryState()
+
+        def raise_pipeline_error(*_args, **_kwargs):
+            raise RuntimeError("provider connection reset")
+
+        with (
+            patch.object(tm, "generate_script", side_effect=raise_pipeline_error),
+            patch.object(tm.sm, "state", state),
+            patch.object(tm.logger, "exception") as log_exception,
+        ):
+            tm.start("traceback-task", params)
+
+        log_exception.assert_called_once()
+        log_message = log_exception.call_args.args[0]
+        self.assertIn("MPT_RENDER_FAILED", log_message)
+        self.assertIn("Traceback (most recent call last):", log_message)
+        self.assertIn("RuntimeError", log_message)
+        self.assertIn("provider connection reset", log_message)
+        self.assertIn("task_id=traceback-task", log_message)
+        self.assertIn("stage=pipeline", log_message)
+        self.assertIn("exception_type=RuntimeError", log_message)
+        self.assertIn("exception_message=provider connection reset", log_message)
+        self.assertIn("error_file_line=", log_message)
+        self.assertRegex(log_message, r"error_file_line=.*test_task\.py:\d+")
+
     def test_start_generates_youtube_metadata_for_each_cross_post(self):
         """
         自动发布到 YouTube 时只生成一次元数据，但要把同一份字段传给每个
