@@ -2,10 +2,11 @@ import glob
 import os
 import pathlib
 import shutil
+import json
 from typing import Union
 
 from fastapi import BackgroundTasks, Depends, Path, Query, Request, UploadFile
-from fastapi.params import File
+from fastapi.params import File, Form
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
 
@@ -18,6 +19,7 @@ from app.controllers.v1.base import new_router
 from app.models.exception import HttpException
 from app.models.schema import (
     AudioRequest,
+    MaterialInfo,
     BgmRetrieveResponse,
     BgmUploadResponse,
     SubtitleRequest,
@@ -28,9 +30,10 @@ from app.models.schema import (
     TaskResponse,
     TaskVideoRequest,
     VideoMaterialUploadResponse,
-    VideoMaterialRetrieveResponse
+    VideoMaterialRetrieveResponse,
 )
 from app.services import bgm as bgm_service
+from app.services import external_media
 from app.services import state as sm
 from app.services import task as tm
 from app.utils import file_security, utils
@@ -75,7 +78,9 @@ def _sanitize_upload_filename(filename: str, request_id: str) -> str:
     return normalized_name
 
 
-def _resolve_path_within_directory(base_dir: str, unsafe_path: str, request_id: str) -> str:
+def _resolve_path_within_directory(
+    base_dir: str, unsafe_path: str, request_id: str
+) -> str:
     try:
         return file_security.resolve_path_within_directory(base_dir, unsafe_path)
     except ValueError as exc:
@@ -171,6 +176,77 @@ def _parse_byte_range(
     return start, end
 
 
+@router.post(
+    "/videos/uploads",
+    response_model=TaskResponse,
+    summary="Generate a video from uploaded external media",
+)
+def create_video_with_uploads(
+    request: Request,
+    request_json: str = Form(...),
+    audio_file: UploadFile | None = File(None),
+    video_files: list[UploadFile] | None = File(None),
+):
+    task_id = utils.get_uuid()
+    request_id = base.get_task_id(request)
+    try:
+        payload = json.loads(request_json)
+        params = TaskVideoRequest.model_validate(payload)
+        uploaded_audio = ""
+        if audio_file is not None:
+            uploaded_audio = external_media.save_task_upload(
+                task_id, audio_file, "audio"
+            )
+            params.custom_audio_file = uploaded_audio
+            if (
+                not params.voice_name
+                or params.voice_name == "elevenlabs-pre-generated-audio"
+            ):
+                params.voice_name = ""
+
+        uploaded_videos = []
+        for upload in video_files or []:
+            uploaded_videos.append(
+                external_media.save_task_upload(task_id, upload, "video")
+            )
+        if uploaded_videos:
+            params.video_source = "local"
+            params.video_materials = [
+                MaterialInfo(provider="task-upload", url=file_path, duration=0)
+                for file_path in uploaded_videos
+            ]
+
+        task = {
+            "task_id": task_id,
+            "request_id": request_id,
+            "params": params.model_dump(),
+            "uploaded_audio": uploaded_audio,
+            "uploaded_videos": uploaded_videos,
+        }
+        sm.state.update_task(task_id)
+        task_manager.add_task(tm.start, task_id=task_id, params=params, stop_at="video")
+        logger.success(
+            f"Upload task created: task_id={task_id}, request_id={request_id}, "
+            f"audio_uploaded={bool(uploaded_audio)}, video_upload_count={len(uploaded_videos)}"
+        )
+        return utils.get_response(200, task)
+    except TaskQueueFullError as e:
+        sm.state.delete_task(task_id)
+        raise HttpException(
+            task_id=task_id, status_code=429, message=f"{request_id}: {str(e)}"
+        )
+    except json.JSONDecodeError as e:
+        raise HttpException(
+            task_id=task_id,
+            status_code=400,
+            message=f"{request_id}: invalid request_json",
+        ) from e
+    except ValueError as e:
+        raise HttpException(
+            task_id=task_id, status_code=400, message=f"{request_id}: {str(e)}"
+        )
+
+
 @router.post("/videos", response_model=TaskResponse, summary="Generate a short video")
 def create_video(
     background_tasks: BackgroundTasks, request: Request, body: TaskVideoRequest
@@ -222,6 +298,7 @@ def create_task(
             task_id=task_id, status_code=400, message=f"{request_id}: {str(e)}"
         )
 
+
 @router.get("/tasks", response_model=TaskListResponse, summary="Get all tasks")
 def get_all_tasks(
     request: Request,
@@ -237,7 +314,6 @@ def get_all_tasks(
         "page_size": page_size,
     }
     return utils.get_response(200, response)
-
 
 
 @router.get(
@@ -370,8 +446,11 @@ def upload_bgm_file(request: Request, file: UploadFile = File(...)):
     response = {"file": safe_filename}
     return utils.get_response(200, response)
 
+
 @router.get(
-    "/video_materials", response_model=VideoMaterialRetrieveResponse, summary="Retrieve local video materials"
+    "/video_materials",
+    response_model=VideoMaterialRetrieveResponse,
+    summary="Retrieve local video materials",
 )
 def get_video_materials_list(request: Request):
     allowed_suffixes = ("mp4", "mov", "avi", "flv", "mkv", "jpg", "jpeg", "png")
@@ -423,8 +502,11 @@ def upload_video_material_file(request: Request, file: UploadFile = File(...)):
         return utils.get_response(200, response)
 
     raise HttpException(
-        "", status_code=400, message=f"{request_id}: Only files with extensions {', '.join(allowed_suffixes)} can be uploaded"
+        "",
+        status_code=400,
+        message=f"{request_id}: Only files with extensions {', '.join(allowed_suffixes)} can be uploaded",
     )
+
 
 @router.get("/stream/{file_path:path}")
 async def stream_video(request: Request, file_path: str):

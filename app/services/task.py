@@ -203,9 +203,7 @@ def _mark_task_failed(task_id: str, stage: str, error: str) -> dict:
 
     message = str(error or "unknown task error").strip()
     progress = int((existing_task or {}).get("progress", 0) or 0)
-    logger.error(
-        f"task failed, task_id: {task_id}, stage: {stage}, error: {message}"
-    )
+    logger.error(f"task failed, task_id: {task_id}, stage: {stage}, error: {message}")
     failure = {
         "task_id": task_id,
         "state": const.TASK_STATE_FAILED,
@@ -338,7 +336,7 @@ def resolve_custom_audio_file(task_id: str, custom_audio_file: str | None) -> st
 
 
 def generate_audio(task_id, params, video_script):
-    '''
+    """
     Generate audio for the video script.
     If a custom audio file is provided, it will be used directly.
     There will be no subtitle maker object returned in this case.
@@ -347,11 +345,13 @@ def generate_audio(task_id, params, video_script):
         - audio_file: path to the generated or provided audio file
         - audio_duration: duration of the audio in seconds
         - sub_maker: subtitle maker object if TTS is used, None otherwise
-    '''
+    """
     logger.info("\n\n## generating audio")
     # /audio 和 /subtitle 请求模型不包含 custom_audio_file，
     # 这里统一做兼容读取，避免直调接口时抛属性错误。
-    requested_custom_audio_file = getattr(params, "custom_audio_file", None)
+    requested_custom_audio_file = getattr(params, "custom_audio_file", None) or getattr(
+        params, "audio_path", None
+    )
     try:
         custom_audio_file = resolve_custom_audio_file(
             task_id, requested_custom_audio_file
@@ -397,14 +397,15 @@ def generate_audio(task_id, params, video_script):
             return None, None, None
         return custom_audio_file, audio_duration, None
 
+
 def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
-    '''
+    """
     Generate subtitle for the video script.
     If subtitle generation is disabled or no subtitle maker is provided, it will return an empty string.
     Otherwise, it will generate the subtitle using the specified provider.
     Returns:
         - subtitle_path: path to the generated subtitle file
-    '''
+    """
     logger.info("\n\n## generating subtitle")
     if not params.subtitle_enabled:
         return ""
@@ -458,8 +459,18 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
 def get_video_materials(task_id, params, video_terms, audio_duration):
     if params.video_source == "local":
         logger.info("\n\n## preprocess local materials")
+        materials_base_dir = (
+            utils.task_dir(task_id)
+            if any(
+                str(getattr(item, "provider", "")) == "task-upload"
+                for item in (params.video_materials or [])
+            )
+            else None
+        )
         materials = video.preprocess_video(
-            materials=params.video_materials, clip_duration=params.video_clip_duration
+            materials=params.video_materials,
+            clip_duration=params.video_clip_duration,
+            base_dir=materials_base_dir,
         )
         if not materials:
             _mark_task_failed(
@@ -503,9 +514,8 @@ def generate_final_videos(
     final_video_paths = []
     combined_video_paths = []
     warnings = []
-    sonilo_bgm_requested = (
-        params.bgm_type == "sonilo"
-        and bgm_service.should_use_bgm(params.bgm_type, params.bgm_volume)
+    sonilo_bgm_requested = params.bgm_type == "sonilo" and bgm_service.should_use_bgm(
+        params.bgm_type, params.bgm_volume
     )
     # 多视频生成默认会打散素材以增加差异；但“按文案顺序匹配素材”追求的是
     # 时间线稳定性和可解释性，所以开启后所有输出都使用顺序拼接。
@@ -565,9 +575,7 @@ def generate_final_videos(
                     f"video_index={index}, error={exc}"
                 )
                 bgm_file_override = ""
-                warnings.append(
-                    {"code": "sonilo_bgm_failed", "video_index": index}
-                )
+                warnings.append({"code": "sonilo_bgm_failed", "video_index": index})
 
         logger.info(f"\n\n## generating video: {index} => {final_video_path}")
         bgm_mix_succeeded = video.generate_video(
@@ -578,11 +586,7 @@ def generate_final_videos(
             params=params,
             bgm_file_override=bgm_file_override,
         )
-        if (
-            params.bgm_type == "sonilo"
-            and bgm_file_override
-            and not bgm_mix_succeeded
-        ):
+        if params.bgm_type == "sonilo" and bgm_file_override and not bgm_mix_succeeded:
             # Sonilo 已成功返回并通过 FFmpeg 校验，但 MoviePy 最终混音仍可能
             # 因运行环境失败。视频服务会保留无 BGM 成片，任务层复用同一结构化
             # 警告通知 WebUI；API 生成失败时 override 为空，不会重复追加警告。
@@ -831,9 +835,7 @@ def _run_cross_post_with_slot(*args) -> None:
         # _run_cross_post 已处理预期异常；这里是最后一道保护，避免未来新增
         # 逻辑抛出的异常只保存在无人读取的 Future 中。
         task_id = str(args[0]) if args else "unknown"
-        logger.exception(
-            f"cross-post worker crashed, task_id: {task_id}, error: {exc}"
-        )
+        logger.exception(f"cross-post worker crashed, task_id: {task_id}, error: {exc}")
         if args:
             _record_cross_post_failure(task_id, exc)
     finally:
@@ -1048,13 +1050,15 @@ def _run_pipeline(task_id, params: VideoParams, stop_at: str = "video"):
         params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
 
     # 6. Generate final videos
-    final_video_paths, combined_video_paths, generation_warnings = generate_final_videos(
-        task_id,
-        params,
-        downloaded_videos,
-        audio_file,
-        subtitle_path,
-        audio_duration,
+    final_video_paths, combined_video_paths, generation_warnings = (
+        generate_final_videos(
+            task_id,
+            params,
+            downloaded_videos,
+            audio_file,
+            subtitle_path,
+            audio_duration,
+        )
     )
 
     if not final_video_paths:
@@ -1075,9 +1079,7 @@ def _run_pipeline(task_id, params: VideoParams, stop_at: str = "video"):
         and upload_post.upload_post_service.auto_upload
     )
     platforms = (
-        list(upload_post.upload_post_service.platforms)
-        if cross_post_enabled
-        else []
+        list(upload_post.upload_post_service.platforms) if cross_post_enabled else []
     )
     should_cross_post = cross_post_enabled and bool(platforms)
     if cross_post_enabled and not platforms:
