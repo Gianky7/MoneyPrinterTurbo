@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.config import config
+import os
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -14,6 +15,7 @@ def test_main_starts_uvicorn_with_runtime_config():
     既避免测试占用端口，也确认监听地址、端口和热重载配置不会在入口层丢失。
     """
     with (
+        patch.dict(os.environ, {}, clear=True),
         patch.object(config, "listen_host", "127.0.0.1"),
         patch.object(config, "listen_port", 8765),
         patch.object(config, "reload_debug", True),
@@ -23,7 +25,7 @@ def test_main_starts_uvicorn_with_runtime_config():
 
     run_server.assert_called_once_with(
         app="app.asgi:app",
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=8765,
         reload=True,
         log_level="warning",
