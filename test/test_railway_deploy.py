@@ -38,6 +38,24 @@ def test_runtime_host_is_public_container_host():
     assert module.get_runtime_host() == "0.0.0.0"
 
 
+def test_runtime_reload_is_false_on_railway_even_when_config_enables_reload(monkeypatch):
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    module = load_main_module()
+
+    with patch.object(config, "reload_debug", True):
+        assert module.get_runtime_reload() is False
+
+
+def test_runtime_reload_uses_config_outside_railway(monkeypatch):
+    monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("RAILWAY_PROJECT_ID", raising=False)
+    monkeypatch.delenv("RAILWAY_SERVICE_ID", raising=False)
+    module = load_main_module()
+
+    with patch.object(config, "reload_debug", True):
+        assert module.get_runtime_reload() is True
+
+
 def test_fastapi_app_imports_without_starting_server():
     from app.asgi import app
 

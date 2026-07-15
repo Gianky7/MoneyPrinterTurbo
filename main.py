@@ -19,14 +19,30 @@ def get_runtime_port() -> int:
     return int(config.listen_port)
 
 
+def is_railway_environment() -> bool:
+    """Return True when running inside Railway's production container."""
+    return any(
+        os.getenv(name)
+        for name in ("RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID")
+    )
+
+
+def get_runtime_reload() -> bool:
+    """Disable reload on Railway so the production worker is never restarted by dev reload."""
+    if is_railway_environment():
+        return False
+    return bool(config.reload_debug)
+
+
 if __name__ == "__main__":
     host = get_runtime_host()
     port = get_runtime_port()
-    logger.info("start server, docs: http://" + host + ":" + str(port) + "/docs")
+    reload = get_runtime_reload()
+    logger.info(f"start server, host={host}, port={port}, reload={reload}, docs=/docs")
     uvicorn.run(
         app="app.asgi:app",
         host=host,
         port=port,
-        reload=config.reload_debug,
+        reload=reload,
         log_level="warning",
     )
