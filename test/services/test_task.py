@@ -472,18 +472,15 @@ class TestTaskService(unittest.TestCase):
             subtitle_file=subtitle_path, video_script="Hello world."
         )
 
-    def test_generate_subtitle_skips_edge_provider_without_sub_maker(self):
-        """
-        Edge 字幕依赖 TTS 返回的 sub_maker 时间轴。
-        自定义音频缺少该对象时应继续跳过，避免产生不可信的字幕时间轴。
-        """
+    def test_generate_subtitle_creates_timed_script_for_edge_without_sub_maker(self):
+        """Custom/pre-generated audio has no TTS sub_maker, so build local timed SRT."""
         task_id = "test-custom-audio-edge-no-submaker"
         task_dir = utils.task_dir(task_id)
         audio_file = os.path.join(task_dir, "custom-audio.mp3")
         Path(audio_file).write_bytes(b"fake audio")
         params = VideoParams(
             video_subject="custom audio",
-            video_script="Hello world.",
+            video_script="Ciao mondo. Questa è una prova italiana molto leggibile.",
             subtitle_enabled=True,
         )
 
@@ -494,22 +491,28 @@ class TestTaskService(unittest.TestCase):
                     "app",
                     dict(tm.config.app, subtitle_provider="edge"),
                 ),
+                patch.object(tm.voice, "get_audio_duration", return_value=6.0),
                 patch.object(tm.voice, "create_subtitle") as create_subtitle,
                 patch.object(tm.subtitle, "create") as whisper_create,
+                patch.object(tm.subtitle, "correct") as whisper_correct,
             ):
                 subtitle_path = tm.generate_subtitle(
                     task_id=task_id,
                     params=params,
-                    video_script="Hello world.",
+                    video_script=params.video_script,
                     sub_maker=None,
                     audio_file=audio_file,
                 )
+                subtitle_text = Path(subtitle_path).read_text(encoding="utf-8")
         finally:
             shutil.rmtree(task_dir, ignore_errors=True)
 
-        self.assertEqual(subtitle_path, "")
+        self.assertTrue(subtitle_path.endswith("subtitle.srt"))
+        self.assertIn("Ciao mondo.", subtitle_text)
+        self.assertIn("00:00:06,000", subtitle_text)
         create_subtitle.assert_not_called()
         whisper_create.assert_not_called()
+        whisper_correct.assert_not_called()
 
     def test_generate_subtitle_does_not_fallback_to_whisper_when_edge_fails(self):
         """
@@ -632,7 +635,7 @@ class TestTaskService(unittest.TestCase):
                 tm,
                 "generate_final_videos",
                 return_value=(["final.mp4"], ["combined.mp4"], []),
-            ),
+            ) as generate_final_videos,
             patch.object(
                 tm.upload_post.upload_post_service,
                 "is_configured",
@@ -647,6 +650,7 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(result["combined_videos"], ["combined.mp4"])
         self.assertEqual(result["cross_post_results"], None)
         self.assertEqual(params.video_concat_mode, tm.VideoConcatMode.sequential)
+        self.assertEqual(generate_final_videos.call_args.args[4], "subtitle.srt")
         cross_post.assert_not_called()
         update_task.assert_called_with(
             "complete-video",
