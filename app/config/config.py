@@ -194,6 +194,40 @@ def load_config():
     return _config_
 
 
+def _parse_env_api_keys(raw_value: str) -> list[str]:
+    """Parse comma-separated API keys while preserving order and removing blanks."""
+    keys: list[str] = []
+    seen: set[str] = set()
+    for value in raw_value.split(","):
+        key = value.strip()
+        if not key or key in seen:
+            continue
+        keys.append(key)
+        seen.add(key)
+    return keys
+
+
+def apply_pexels_env_override(
+    app_config: dict | None = None, environ: dict | None = None
+) -> None:
+    """Apply Railway-compatible Pexels API key environment overrides."""
+    target = app if app_config is None else app_config
+    source_env = os.environ if environ is None else environ
+
+    raw_keys = None
+    if "PEXELS_API_KEYS" in source_env:
+        raw_keys = source_env.get("PEXELS_API_KEYS", "")
+    elif "PEXELS_API_KEY" in source_env:
+        raw_keys = source_env.get("PEXELS_API_KEY", "")
+
+    if raw_keys is None:
+        return
+
+    pexels_api_keys = _parse_env_api_keys(raw_keys)
+    target["pexels_api_keys"] = pexels_api_keys
+    logger.info(f"PEXELS_KEYS_LOADED_FROM_ENV count={len(pexels_api_keys)}")
+
+
 def save_config():
     """
     原子保存运行时配置。
@@ -247,6 +281,7 @@ def save_config():
 
 _cfg = load_config()
 app = _SynchronizedConfig(_cfg.get("app", {}))
+apply_pexels_env_override(app)
 whisper = _cfg.get("whisper", {})
 proxy = _cfg.get("proxy", {})
 azure = _SynchronizedConfig(_cfg.get("azure", {}))
