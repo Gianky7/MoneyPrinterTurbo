@@ -102,3 +102,90 @@ class TestConfigPersistence:
         worker.join(timeout=1)
         assert write_finished.is_set()
         config.app.pop("runtime_lock_test", None)
+
+
+class TestPexelsEnvironmentConfig:
+    def test_single_pexels_api_key_from_fallback_env(self):
+        app_config = {"pexels_api_keys": ["config-key"]}
+
+        with patch.object(config.logger, "info") as log_info:
+            config.apply_pexels_env_override(
+                app_config, {"PEXELS_API_KEY": "railway-single-key"}
+            )
+
+        assert app_config["pexels_api_keys"] == ["railway-single-key"]
+        log_info.assert_called_once_with("PEXELS_KEYS_LOADED_FROM_ENV count=1")
+
+    def test_multiple_pexels_api_keys_from_primary_env(self):
+        app_config = {}
+
+        config.apply_pexels_env_override(
+            app_config, {"PEXELS_API_KEYS": "first-key,second-key,third-key"}
+        )
+
+        assert app_config["pexels_api_keys"] == [
+            "first-key",
+            "second-key",
+            "third-key",
+        ]
+
+    def test_pexels_api_keys_strips_spaces_and_empty_values(self):
+        app_config = {}
+
+        config.apply_pexels_env_override(
+            app_config, {"PEXELS_API_KEYS": " first-key, ,second-key,, third-key "}
+        )
+
+        assert app_config["pexels_api_keys"] == [
+            "first-key",
+            "second-key",
+            "third-key",
+        ]
+
+    def test_pexels_api_keys_deduplicates_preserving_order(self):
+        app_config = {}
+
+        config.apply_pexels_env_override(
+            app_config, {"PEXELS_API_KEYS": "first-key,second-key,first-key,third-key"}
+        )
+
+        assert app_config["pexels_api_keys"] == [
+            "first-key",
+            "second-key",
+            "third-key",
+        ]
+
+    def test_pexels_api_keys_env_takes_precedence_over_single_key_and_config(self):
+        app_config = {"pexels_api_keys": ["config-key"]}
+
+        config.apply_pexels_env_override(
+            app_config,
+            {
+                "PEXELS_API_KEYS": "primary-key",
+                "PEXELS_API_KEY": "fallback-key",
+            },
+        )
+
+        assert app_config["pexels_api_keys"] == ["primary-key"]
+
+    def test_pexels_env_override_does_not_log_secret_values(self):
+        app_config = {}
+        secret = "super-secret-pexels-key"
+
+        with patch.object(config.logger, "info") as log_info:
+            config.apply_pexels_env_override(app_config, {"PEXELS_API_KEYS": secret})
+
+        logged_text = " ".join(
+            str(arg) for call in log_info.call_args_list for arg in call.args
+        )
+        assert "PEXELS_KEYS_LOADED_FROM_ENV count=1" in logged_text
+        assert secret not in logged_text
+
+    def test_pexels_api_keys_keeps_config_when_env_absent(self):
+        app_config = {"pexels_api_keys": ["config-key"]}
+
+        with patch.object(config.logger, "info") as log_info:
+            config.apply_pexels_env_override(app_config, {})
+
+        assert app_config["pexels_api_keys"] == ["config-key"]
+        log_info.assert_not_called()

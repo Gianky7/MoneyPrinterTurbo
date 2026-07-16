@@ -6,7 +6,7 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.config import config
 from app.controllers.manager.base_manager import TaskQueueFullError
@@ -40,21 +40,18 @@ class TestVideoControllerHelpers(unittest.TestCase):
                     expected,
                 )
 
-    def test_fastapi_startup_recovers_interrupted_cross_posts(self):
-        """API 进程启动时必须执行一次发布遗留状态恢复。"""
+    def test_fastapi_startup_schedules_cross_post_recovery(self):
+        """API startup schedules recovery in the background instead of blocking readiness."""
         from app import asgi
-        from app.services import task as task_service
 
-        with patch.object(
-            task_service, "recover_interrupted_cross_posts"
-        ) as recover:
-            async def run_lifespan():
-                async with asgi.application_lifespan(asgi.app):
-                    pass
+        async def run_lifespan():
+            async with asgi.application_lifespan(asgi.app):
+                pass
 
+        with patch.object(asgi, "_run_startup_recovery", AsyncMock()) as recovery:
             asyncio.run(run_lifespan())
 
-        recover.assert_called_once_with()
+        recovery.assert_called_once_with()
 
     def test_sanitize_upload_filename_rejects_empty_name(self):
         """空文件名和目录占位符不能进入服务端存储路径。"""
