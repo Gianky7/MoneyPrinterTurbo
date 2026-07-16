@@ -399,6 +399,90 @@ def generate_audio(task_id, params, video_script):
         return custom_audio_file, audio_duration, None
 
 
+
+def _format_srt_timestamp(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    milliseconds = int(round(seconds * 1000))
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def _split_script_for_timed_subtitles(text: str, max_chars: int = 82) -> list[str]:
+    normalized = re.sub(r"\s+", " ", (text or "")).strip()
+    if not normalized:
+        return []
+
+    sentence_parts = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?;:。！？；：])\s+|(?<=[.!?;:。！？；：])", normalized)
+        if part.strip()
+    ]
+    segments: list[str] = []
+    for sentence in sentence_parts or [normalized]:
+        if len(sentence) <= max_chars:
+            segments.append(sentence)
+            continue
+
+        words = sentence.split(" ")
+        if len(words) == 1:
+            segments.extend(
+                sentence[index : index + max_chars].strip()
+                for index in range(0, len(sentence), max_chars)
+                if sentence[index : index + max_chars].strip()
+            )
+            continue
+
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if current and len(candidate) > max_chars:
+                segments.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            segments.append(current)
+
+    return segments
+
+
+def _create_timed_script_subtitle(
+    video_script: str, audio_file: str, subtitle_path: str
+) -> int:
+    audio_duration = float(voice.get_audio_duration(audio_file) or 0.0)
+    logger.info(f"MPT_AUDIO_DURATION seconds={audio_duration:.3f}")
+    if audio_duration <= 0:
+        logger.warning("cannot create timed subtitle because audio duration is empty")
+        return 0
+
+    segments = _split_script_for_timed_subtitles(video_script)
+    if not segments:
+        logger.warning("cannot create timed subtitle because video_script is empty")
+        return 0
+
+    os.makedirs(path.dirname(subtitle_path), exist_ok=True)
+    segment_duration = audio_duration / len(segments)
+    srt_blocks = []
+    for index, segment in enumerate(segments, start=1):
+        start_seconds = (index - 1) * segment_duration
+        end_seconds = (
+            audio_duration if index == len(segments) else index * segment_duration
+        )
+        timestamp_line = (
+            f"{_format_srt_timestamp(start_seconds)} --> "
+            f"{_format_srt_timestamp(end_seconds)}"
+        )
+        srt_blocks.append(f"{index}\n{timestamp_line}\n{segment}")
+
+    with open(subtitle_path, "w", encoding="utf-8") as file:
+        file.write("\n\n".join(srt_blocks) + "\n")
+
+    logger.info("MPT_SUBTITLE_FALLBACK mode=timed_script")
+    logger.info(f"MPT_SUBTITLE_READY path={subtitle_path} segments={len(segments)}")
+    return len(segments)
+
 def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     """
     Generate subtitle for the video script.
@@ -419,17 +503,14 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
         logger.info("subtitle provider is empty, skip subtitle generation")
         return ""
 
+    used_timed_script_fallback = False
     if sub_maker is None and subtitle_provider != "whisper":
-        # 自定义音频不会经过 TTS，因此没有 Edge/Azure 等 TTS 返回的
-        # sub_maker 时间轴。只有 Whisper 可以直接从音频文件转写字幕；
-        # 其他字幕提供方继续保持原有行为，避免生成错误的空时间轴。
-        logger.warning(
-            "subtitle maker is missing, skip subtitle generation for provider: "
-            f"{subtitle_provider}"
-        )
-        return ""
+        _create_timed_script_subtitle(video_script, audio_file, subtitle_path)
+        if not os.path.exists(subtitle_path):
+            return ""
+        used_timed_script_fallback = True
 
-    if subtitle_provider == "edge":
+    if subtitle_provider == "edge" and not used_timed_script_fallback:
         voice.create_subtitle(
             text=video_script, sub_maker=sub_maker, subtitle_file=subtitle_path
         )
